@@ -1,12 +1,71 @@
-const Flat = require('../models/Flat');
+// ===================================
+// STEP 2: Update your existing flatController.js
+// File: backend/controllers/flatController.js (REPLACE YOUR EXISTING FILE)
+// ===================================
 
-// Existing flat operations
+const Flat = require('../models/Flat');
+const {
+    EnhancedFlat,
+    UserFactory,
+    FlatSorter,
+    ConfigManager,
+    ValidationHandler,
+    TitleValidationHandler,
+    ImageValidationHandler,
+    EventManager,
+    FlatUpdateObserver,
+    FlatWithMetricsDecorator
+} = require('./BaseClasses');
+
+// Initialize singletons and observers
+const config = ConfigManager.getInstance();
+const eventManager = new EventManager();
+eventManager.subscribe('flat_created', new FlatUpdateObserver());
+eventManager.subscribe('flat_updated', new FlatUpdateObserver());
+eventManager.subscribe('flat_deleted', new FlatUpdateObserver());
+
+// Setup validation chain
+const validationChain = new TitleValidationHandler();
+validationChain.setNext(new ImageValidationHandler());
+
+/**
+ * Enhanced Flat Controller using OOP and Design Patterns
+ * Demonstrates: Integration of all patterns in existing structure
+ */
+
 const getFlats = async (req, res) => {
     try {
-        const flats = await Flat.find({ userId: req.user.id });
-        res.json(flats);
+        // Create user object using Factory Pattern
+        const user = UserFactory.createUserFromRequest(req);
+        
+        // Get flats from database
+        const mongoFlats = await Flat.find({ userId: user.getId() });
+        
+        // Convert to Enhanced Flat objects (Inheritance + Polymorphism)
+        const enhancedFlats = mongoFlats.map(doc => EnhancedFlat.fromDocument(doc));
+        
+        // Apply sorting strategy (Strategy Pattern)
+        const sortBy = req.query.sortBy || 'date';
+        const sorter = FlatSorter.createSorter(sortBy);
+        const sortedFlats = sorter.sort(enhancedFlats);
+        
+        // Apply decorator for metrics (Decorator Pattern)
+        const decoratedFlats = sortedFlats.map(flat => {
+            const decorated = new FlatWithMetricsDecorator(flat);
+            decorated.incrementViewCount(); // Track view
+            return decorated;
+        });
+        
+        // Convert back to JSON for response
+        const responseData = decoratedFlats.map(flat => flat.toJSON());
+        
+        res.json(responseData);
     } catch (error) {
-        res.status(500).json({ message: error.message });
+        console.error('Error in getFlats:', error);
+        res.status(500).json({ 
+            message: 'Error retrieving flats', 
+            error: error.message 
+        });
     }
 };
 
@@ -15,26 +74,48 @@ const addFlat = async (req, res) => {
     console.log('Add Flat called with:', { title, description, inspectionDate, userId: req.user?.id });
     console.log('Files received:', req.files);
 
-    if (!title) {
-        return res.status(400).json({ message: 'Title is required' });
-    }
-
     try {
+        // Create user object using Factory Pattern
+        const user = UserFactory.createUserFromRequest(req);
+        
+        // Validate using Chain of Responsibility Pattern
+        const validationData = { title, description, files: req.files };
+        const validationResult = validationChain.handle(validationData);
+        
+        if (!validationResult.success) {
+            return res.status(400).json({ message: validationResult.message });
+        }
+        
+        // Process uploaded images using Singleton config
         const images = req.files ? req.files.map(file => file.filename) : [];
         console.log('Images to save:', images);
         
-        const flat = await Flat.create({ 
-            userId: req.user.id, 
-            title, 
-            description, 
-            inspectionDate,
-            images 
+        // Create Enhanced Flat object (Inheritance + Polymorphism)
+        const flatData = { title, description, inspectionDate, images };
+        const enhancedFlat = new EnhancedFlat(user.getId(), flatData);
+        
+        // Validate using OOP method (Polymorphism)
+        enhancedFlat.validate();
+        
+        // Save to database
+        const savedFlat = await Flat.create(enhancedFlat.toJSON());
+        console.log('Flat created:', savedFlat);
+        
+        // Notify observers (Observer Pattern)
+        eventManager.notify('flat_created', { 
+            flatId: savedFlat._id, 
+            userId: user.getId() 
         });
-        console.log('Flat created:', flat);
-        res.status(201).json(flat);
+        
+        res.status(201).json(savedFlat);
     } catch (error) {
         console.error('Error creating flat:', error);
-        res.status(500).json({ message: error.message });
+        
+        if (error.message.includes('required') || error.message.includes('characters')) {
+            res.status(400).json({ message: error.message });
+        } else {
+            res.status(500).json({ message: error.message });
+        }
     }
 };
 
@@ -44,54 +125,93 @@ const updateFlat = async (req, res) => {
     console.log('Files received for update:', req.files);
     
     try {
-        const flat = await Flat.findById(req.params.id);
-        if (!flat) return res.status(404).json({ message: 'Flat not found' });
+        // Create user object using Factory Pattern
+        const user = UserFactory.createUserFromRequest(req);
         
-        // Check if user owns this flat
-        if (flat.userId.toString() !== req.user.id) {
+        // Get existing flat from database
+        const existingDoc = await Flat.findById(req.params.id);
+        if (!existingDoc) {
+            return res.status(404).json({ message: 'Flat not found' });
+        }
+        
+        // Convert to Enhanced Flat (Inheritance)
+        const enhancedFlat = EnhancedFlat.fromDocument(existingDoc);
+        
+        // Check permissions using polymorphic method
+        if (!user.canAccessFlat(enhancedFlat)) {
             return res.status(403).json({ message: 'Not authorized to update this flat' });
         }
         
-        // Update text fields
-        flat.title = title || flat.title;
-        flat.description = description || flat.description;
-        flat.vacant = vacant ?? flat.vacant;
-        flat.inspectionDate = inspectionDate || flat.inspectionDate;
+        // Update properties using OOP methods (Encapsulation)
+        if (title) enhancedFlat.setTitle(title);
+        if (description !== undefined) enhancedFlat.setDescription(description);
+        if (vacant !== undefined) enhancedFlat.setVacant(vacant);
+        if (tenantDetails) enhancedFlat.setTenantDetails(tenantDetails);
         
-        // Handle tenant details
-        if (tenantDetails !== undefined) {
-            flat.tenantDetails = tenantDetails;
-        }
-        
-        // Handle images
+        // Process new images
         if (req.files && req.files.length > 0) {
             const newImages = req.files.map(file => file.filename);
             console.log('New images to add:', newImages);
-            flat.images = [...(flat.images || []), ...newImages];
+            newImages.forEach(url => enhancedFlat.addImage(url));
         }
         
-        const updatedFlat = await flat.save();
+        // Validate using polymorphic method
+        enhancedFlat.validate();
+        
+        // Update in database
+        const updateData = enhancedFlat.toJSON();
+        const updatedFlat = await Flat.findByIdAndUpdate(req.params.id, updateData, { new: true });
+        
         console.log('Flat updated:', updatedFlat);
+        
+        // Notify observers (Observer Pattern)
+        eventManager.notify('flat_updated', { 
+            flatId: req.params.id, 
+            userId: user.getId() 
+        });
+        
         res.json(updatedFlat);
     } catch (error) {
         console.error('Error updating flat:', error);
-        res.status(500).json({ message: error.message });
+        
+        if (error.message.includes('required') || error.message.includes('characters')) {
+            res.status(400).json({ message: error.message });
+        } else {
+            res.status(500).json({ message: error.message });
+        }
     }
 };
 
 const deleteFlat = async (req, res) => {
     try {
-        const flat = await Flat.findById(req.params.id);
-        if (!flat) return res.status(404).json({ message: 'Flat not found' });
+        // Create user object using Factory Pattern
+        const user = UserFactory.createUserFromRequest(req);
         
-        // Check if user owns this flat
-        if (flat.userId.toString() !== req.user.id) {
+        // Get existing flat
+        const existingDoc = await Flat.findById(req.params.id);
+        if (!existingDoc) {
+            return res.status(404).json({ message: 'Flat not found' });
+        }
+        
+        // Convert to Enhanced Flat for permission checking
+        const enhancedFlat = EnhancedFlat.fromDocument(existingDoc);
+        
+        // Check permissions using polymorphic method
+        if (!user.canAccessFlat(enhancedFlat)) {
             return res.status(403).json({ message: 'Not authorized to delete this flat' });
         }
         
-        await flat.remove();
+        await Flat.findByIdAndDelete(req.params.id);
+        
+        // Notify observers (Observer Pattern)
+        eventManager.notify('flat_deleted', { 
+            flatId: req.params.id, 
+            userId: user.getId() 
+        });
+        
         res.json({ message: 'Flat deleted' });
     } catch (error) {
+        console.error('Error deleting flat:', error);
         res.status(500).json({ message: error.message });
     }
 };
@@ -101,20 +221,29 @@ const deleteImage = async (req, res) => {
         const { id, imageName } = req.params;
         console.log('Deleting image:', imageName, 'from flat:', id);
         
-        const flat = await Flat.findById(id);
-        if (!flat) {
+        // Create user object using Factory Pattern
+        const user = UserFactory.createUserFromRequest(req);
+        
+        const existingDoc = await Flat.findById(id);
+        if (!existingDoc) {
             return res.status(404).json({ message: 'Flat not found' });
         }
         
-        // Check if user owns this flat
-        if (flat.userId.toString() !== req.user.id) {
+        // Convert to Enhanced Flat
+        const enhancedFlat = EnhancedFlat.fromDocument(existingDoc);
+        
+        // Check permissions
+        if (!user.canAccessFlat(enhancedFlat)) {
             return res.status(403).json({ message: 'Not authorized to delete this image' });
         }
         
-        // Remove image from flat's images array
-        flat.images = flat.images.filter(img => img !== imageName);
-        await flat.save();
+        // Remove image using OOP method
+        enhancedFlat.removeImage(imageName);
         
+        // Update in database
+        await Flat.findByIdAndUpdate(id, enhancedFlat.toJSON());
+        
+        // Delete physical file
         const fs = require('fs');
         const path = require('path');
         const imagePath = path.join(__dirname, '../uploads/flats', imageName);
@@ -127,7 +256,7 @@ const deleteImage = async (req, res) => {
             }
         });
         
-        res.json({ message: 'Image deleted successfully', flat });
+        res.json({ message: 'Image deleted successfully', flat: enhancedFlat.toJSON() });
     } catch (error) {
         console.error('Error deleting image:', error);
         res.status(500).json({ message: error.message });
@@ -136,10 +265,23 @@ const deleteImage = async (req, res) => {
 
 const getPublicFlats = async (req, res) => {
     try {
+        // Get all flats
         const flats = await Flat.find()
             .populate('userId', 'name email') 
-            .sort({ createdAt: -1 }); 
-        res.json(flats);
+            .sort({ createdAt: -1 });
+        
+        // Convert to Enhanced Flat objects and apply sorting if requested
+        const enhancedFlats = flats.map(doc => EnhancedFlat.fromDocument(doc));
+        
+        // Apply sorting strategy if requested
+        const sortBy = req.query.sortBy;
+        if (sortBy) {
+            const sorter = FlatSorter.createSorter(sortBy);
+            const sortedFlats = sorter.sort(enhancedFlats);
+            return res.json(sortedFlats.map(flat => flat.toJSON()));
+        }
+        
+        res.json(enhancedFlats.map(flat => flat.toJSON()));
     } catch (error) {
         res.status(500).json({ message: error.message });
     }
@@ -338,7 +480,7 @@ const getAllTenants = async (req, res) => {
     }
 };
 
-module.exports = { 
+module.exports = {
     getFlats, 
     addFlat, 
     updateFlat, 
