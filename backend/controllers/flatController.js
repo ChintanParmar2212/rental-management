@@ -287,7 +287,9 @@ const getPublicFlats = async (req, res) => {
     }
 };
 
-// Keep your existing tenant CRUD methods but add OOP where possible
+// tenant crud
+
+// Add tenant 
 const addTenant = async (req, res) => {
     const { flatId } = req.params;
     const { name, email, phone, moveInDate, rentAmount } = req.body;
@@ -299,56 +301,195 @@ const addTenant = async (req, res) => {
     }
     
     try {
-        // Create user object using Factory Pattern
-        const user = UserFactory.createUserFromRequest(req);
-        
-        const existingDoc = await Flat.findById(flatId);
-        if (!existingDoc) {
+        const flat = await Flat.findById(flatId);
+        if (!flat) {
             return res.status(404).json({ message: 'Flat not found' });
         }
         
-        // Convert to Enhanced Flat
-        const enhancedFlat = EnhancedFlat.fromDocument(existingDoc);
-        
-        // Check permissions
-        if (!user.canAccessFlat(enhancedFlat)) {
+        // Check if user owns this flat
+        if (flat.userId.toString() !== req.user.id) {
             return res.status(403).json({ message: 'Not authorized to add tenant to this flat' });
         }
         
         // Check if flat already has a tenant
-        if (!enhancedFlat.isVacant() && enhancedFlat.getTenantDetails()) {
+        if (!flat.vacant && flat.tenantDetails) {
             return res.status(400).json({ message: 'Flat already has a tenant. Update existing tenant or mark flat as vacant first.' });
         }
+        //
+        const tenantData = {
+            name,
+            email,
+            phone,
+            moveInDate,
+            rentAmount: rentAmount ? Number(rentAmount) : null
+        };
         
-        const tenantData = { name, email, phone, moveInDate, rentAmount };
+        flat.tenantDetails = tenantData;
+        flat.vacant = false;
         
-        // Set tenant using OOP method
-        enhancedFlat.setTenantDetails(tenantData);
+        const updatedFlat = await flat.save();
+        console.log('Tenant added to flat:', updatedFlat);
         
-        // Update in database
-        const updatedFlat = await Flat.findByIdAndUpdate(flatId, enhancedFlat.toJSON(), { new: true });
-        
-        // Notify observers
-        eventManager.notify('tenant_added', { 
-            flatId: flatId, 
-            tenantName: name, 
-            userId: user.getId() 
+        res.status(201).json({
+            message: 'Tenant added successfully',
+            flat: updatedFlat,
+            tenant: tenantData
         });
-        
-        res.status(201).json(updatedFlat);
     } catch (error) {
         console.error('Error adding tenant:', error);
         res.status(500).json({ message: error.message });
     }
 };
 
+// Get tenant details
+const getTenant = async (req, res) => {
+    const { flatId } = req.params;
+    
+    try {
+        const flat = await Flat.findById(flatId);
+        if (!flat) {
+            return res.status(404).json({ message: 'Flat not found' });
+        }
+        
+        // Check if user owns this flat
+        if (flat.userId.toString() !== req.user.id) {
+            return res.status(403).json({ message: 'Not authorized to view tenant details for this flat' });
+        }
+        
+        if (!flat.tenantDetails) {
+            return res.status(404).json({ message: 'No tenant found for this flat' });
+        }
+        
+        res.json({
+            flatId: flat._id,
+            flatTitle: flat.title,
+            tenant: flat.tenantDetails,
+            vacant: flat.vacant
+        });
+    } catch (error) {
+        console.error('Error getting tenant:', error);
+        res.status(500).json({ message: error.message });
+    }
+};
+
+// Update tenant details
+const updateTenant = async (req, res) => {
+    const { flatId } = req.params;
+    const { name, email, phone, moveInDate, rentAmount } = req.body;
+    
+    console.log('Update Tenant called with:', { flatId, name, email, phone, moveInDate, rentAmount });
+    
+    try {
+        const flat = await Flat.findById(flatId);
+        if (!flat) {
+            return res.status(404).json({ message: 'Flat not found' });
+        }
+        
+        // Check if user owns this flat
+        if (flat.userId.toString() !== req.user.id) {
+            return res.status(403).json({ message: 'Not authorized to update tenant for this flat' });
+        }
+        
+        if (!flat.tenantDetails) {
+            return res.status(404).json({ message: 'No tenant found for this flat to update' });
+        }
+        
+        // Update tenant details
+        if (name !== undefined) flat.tenantDetails.name = name;
+        if (email !== undefined) flat.tenantDetails.email = email;
+        if (phone !== undefined) flat.tenantDetails.phone = phone;
+        if (moveInDate !== undefined) flat.tenantDetails.moveInDate = moveInDate;
+        if (rentAmount !== undefined) flat.tenantDetails.rentAmount = rentAmount ? Number(rentAmount) : null;
+        
+        const updatedFlat = await flat.save();
+        console.log('Tenant updated:', updatedFlat.tenantDetails);
+        
+        res.json({
+            message: 'Tenant updated successfully',
+            flat: updatedFlat,
+            tenant: updatedFlat.tenantDetails
+        });
+    } catch (error) {
+        console.error('Error updating tenant:', error);
+        res.status(500).json({ message: error.message });
+    }
+};
+
+// Remove tenant - mark vacant
+const removeTenant = async (req, res) => {
+    const { flatId } = req.params;
+    
+    console.log('Remove Tenant called for flatId:', flatId);
+    
+    try {
+        const flat = await Flat.findById(flatId);
+        if (!flat) {
+            return res.status(404).json({ message: 'Flat not found' });
+        }
+        
+        // Check if user owns this flat
+        if (flat.userId.toString() !== req.user.id) {
+            return res.status(403).json({ message: 'Not authorized to remove tenant from this flat' });
+        }
+        
+        if (!flat.tenantDetails) {
+            return res.status(404).json({ message: 'No tenant found for this flat' });
+        }
+        
+        const removedTenant = { ...flat.tenantDetails };
+        flat.tenantDetails = null;
+        flat.vacant = true;
+        
+        const updatedFlat = await flat.save();
+        console.log('Tenant removed from flat:', updatedFlat);
+        
+        res.json({
+            message: 'Tenant removed successfully',
+            flat: updatedFlat,
+            removedTenant: removedTenant
+        });
+    } catch (error) {
+        console.error('Error removing tenant:', error);
+        res.status(500).json({ message: error.message });
+    }
+};
+
+// Get all tenants for user's flats
+const getAllTenants = async (req, res) => {
+    try {
+        const flats = await Flat.find({ 
+            userId: req.user.id,
+            tenantDetails: { $exists: true, $ne: null }
+        });
+        
+        const tenants = flats.map(flat => ({
+            flatId: flat._id,
+            flatTitle: flat.title,
+            tenant: flat.tenantDetails,
+            vacant: flat.vacant
+        }));
+        
+        res.json({
+            message: 'Tenants retrieved successfully',
+            count: tenants.length,
+            tenants: tenants
+        });
+    } catch (error) {
+        console.error('Error getting all tenants:', error);
+        res.status(500).json({ message: error.message });
+    }
+};
+
 module.exports = {
-    getFlats,
-    addFlat,
-    updateFlat,
-    deleteFlat,
-    deleteImage,
+    getFlats, 
+    addFlat, 
+    updateFlat, 
+    deleteFlat, 
+    deleteImage, 
     getPublicFlats,
-    addTenant
-    // Add your other existing tenant methods here
+    addTenant,
+    getTenant,
+    updateTenant,
+    removeTenant,
+    getAllTenants
 };
